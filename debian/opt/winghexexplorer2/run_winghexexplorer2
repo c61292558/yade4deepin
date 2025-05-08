@@ -1,0 +1,10 @@
+#!/bin/bash
+
+# 0. 切换到脚本所在目录
+script_dir=$(cd $(dirname $0);pwd)
+export LD_LIBRARY_PATH=$script_dir/WingPlugin:$LD_LIBRARY_PATH
+
+cd $script_dir
+
+
+./WingHexExplorer2

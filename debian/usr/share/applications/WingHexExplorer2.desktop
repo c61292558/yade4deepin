@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=WingHexExplorer2
+Comment=本软件是基于 QT 编写的十六进制编辑器，采用 C++ 进行开发，提供强大而免费的十六进制编辑器。
+Exec=/opt/winghexexplorer2/run_winghexexplorer2
+Icon=winghex
+Type=Application
+StartupNotify=true
+Categories=Office;
+
