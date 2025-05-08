@@ -1,0 +1,31 @@
+sinclude $(GENERAL_RULES)/mplib$(WM_MPLIB)
+sinclude $(RULES)/mplib$(WM_MPLIB)
+EXE_INC = \
+    -I./DPMTurbulenceModels/lnInclude \
+    -I$(LIB_SRC)/MomentumTransportModels/momentumTransportModels/lnInclude \
+    -I$(LIB_SRC)/MomentumTransportModels/incompressible/lnInclude \
+    -I$(LIB_SRC)/MomentumTransportModels/phaseIncompressible/lnInclude \
+    -I$(LIB_SRC)/physicalProperties/lnInclude \
+    -I$(LIB_SRC)/finiteVolume/lnInclude \
+    -I$(LIB_SRC)/meshTools/lnInclude  \
+    -I../../FoamYade/lnInclude    \
+    -I../../FoamYade/meshtree       \
+    -I$(LIB_SRC)/Pstream/mpi/lnInclude  \
+    $(PFLAGS) $(PINC) \
+    -DfoamVersion=$(shell echo $(WM_PROJECT_VERSION) | sed 's/v//g')
+
+
+EXE_LIBS = \
+    -lphysicalProperties \
+    -lmomentumTransportModels \
+    -lincompressibleMomentumTransportModels \
+    -lphaseIncompressibleMomentumTransportModels \
+    -lfiniteVolume \
+    -lmeshTools \
+    -lfvModels \
+    -lfvConstraints \
+    -L$(FOAM_USER_LIBBIN) \
+    -lMeshTree  \
+    -lYadeFoam	\
+    -L$(FOAM_LIBBIN)/$(FOAM_MPI)/lPstream	\
+     $(PLIBS)

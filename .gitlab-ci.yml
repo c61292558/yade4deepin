@@ -1,0 +1,1308 @@
+# The previously used image:
+# image: registry.gitlab.com/yade-dev/docker-yade
+#
+# Five new images:
+# image: registry.gitlab.com/yade-dev/docker-yade:ubuntu18.04
+# image: registry.gitlab.com/yade-dev/docker-yade:ubuntu18.04_nogui
+# image: registry.gitlab.com/yade-dev/docker-yade:ubuntu18.04_foam
+# image: registry.gitlab.com/yade-dev/docker-yade:ubuntu20.04
+# image: registry.gitlab.com/yade-dev/docker-yade:ubuntu22.04
+# image: registry.gitlab.com/yade-dev/docker-yade:ubuntu24.04
+# image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+# image: registry.gitlab.com/yade-dev/docker-yade:debian-bookworm
+# image: registry.gitlab.com/yade-dev/docker-yade:suse15
+# image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye-mips64el # crashes, as predicted by warnings -Wcast-align
+# image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye-ppc64el
+# image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye-arm64
+# image: registry.gitlab.com/yade-dev/docker-yade:debian-bookworm-arm64
+# image: registry.gitlab.com/yade-dev/docker-yade:archlinux-current
+#
+# Useful link to validator: https://gitlab.com/yade-dev/trunk/-/ci/lint
+
+
+stages:
+  - build
+  - test
+  - pages
+  - deb
+
+variables:
+  GIT_SUBMODULE_STRATEGY: recursive
+
+# See: https://docs.gitlab.com/ee/ci/yaml/#retry
+# Skip repeats when:
+#     - always: Retry on any failure (default).
+#     - missing_dependency_failure: Retry if a dependency was missing.
+#     - runner_unsupported: Retry if the runner was unsupported.
+#     - unmet_prerequisites: Retry if the job failed to complete prerequisite tasks.
+.gitlab_runner_retry_template: &gitlab_runner_retry_definition
+  retry:
+    max: 2
+    when:
+      - unknown_failure
+      - api_failure
+      - stuck_or_timeout_failure
+      - runner_system_failure
+      - stale_schedule
+      - job_execution_timeout
+      - archived_failure
+      - scheduler_failure
+      - data_integrity_failure
+
+# If you want to compile everything also on merge_request, change this template.
+.plaftorms_template: &platforms_definition
+  only:
+    - master
+    - merge_request
+
+.skip_WIP_template: &skip_WIP
+  except:
+    variables:
+      - $CI_MERGE_REQUEST_TITLE =~ /^WIP:.*/
+
+.skip_WIP_and_Draft_template: &skip_WIP_and_Draft
+  except:
+    variables:
+      - $CI_MERGE_REQUEST_TITLE =~ /^WIP:.*/
+      - $CI_MERGE_REQUEST_TITLE =~ /^Draft:.*/
+
+.skip_wip_test_template_nogui: &skip_GUI_TEST
+  before_script: # there can be only one before_script: so if you need NO_GUI and before_script: this line has to be pasted there
+    - export NO_GUI="NO_GUI"
+
+# stage: cmake uses ccache for faster compilation. ccache works only with -DCHUNKSIZE=1
+# Important: to get ccache to work an external volume must be mounted by gitlab-runner (in config file: /etc/gitlab-runner/config.toml)
+#            into docker directory /root/.ccache. By default in /etc/gitlab-runner/config.toml there is already this line:
+#               volumes = ["/cache"]
+#            it must be replaced with:
+#               volumes = ["/cache","/home/docker/ccache:/root/.ccache:rw"]
+#            where /home/docker/ccache is the directory in the host with write access.
+# See also : https://gitlab.com/gitlab-org/gitlab-runner/blob/master/docs/configuration/advanced-configuration.md#example-2-mount-a-host-directory-as-a-data-volume
+
+# Perhaps two more will added later
+# 1.4. only: tags       Perhaps creating tags would trigger a build, e.g. tagging a new release?
+# 1.5. only: schedules  For scheluded pipelines. Perhaps it will be e.g. for https://gitlab.com/yade-dev/trunk/issues/58
+#                       It is possible to send an environment variable to the pipeline from the schedule. So here maybe a selection of
+#                       what .deb package to build could be performed using an env variable.
+# in merge_request use the faster  linker: ld.gold. We save 2 minutes on every build.
+# in master        use the regular linker: ld.bfd.  Very rarely we might encounter linker errors. It's worth the faster build in merge_request.
+
+.make_template: &make_definition
+  <<: *platforms_definition
+  <<: *gitlab_runner_retry_definition
+  stage: build
+  script:
+    - cd ./data
+    - git log --oneline -n 5
+    - cd ..
+    - export PYTHONUNBUFFERED=1
+    - mkdir install
+    # the command 'git diff -w --shortstat' counts the number of changes. The '-w' tells it to ignore whitespace.
+    - |
+      if [[ -e "/usr/bin/clang-format" ]] ; then
+          export CLANG_VERSION=`clang-format --version | sed -e 's/^.*version\s\([0-9]\+\).*$/\1/g'` ;
+          if [[ ${CHECK_FORMAT} == "CHECK_FORMAT" && ${CLANG_VERSION} -ge "10" ]] ; then
+                  echo -e "\n\e[92m===\nWas ChangeLog updated with the latest changes?\n===\e[0m\n" ;
+                  export CHANGELOG_LINES=`git diff --shortstat origin/master -- ChangeLog | sed -e 's/^.*,\s\([0-9]\+\)\sinsertion.*$/\1/g'` ;
+                  export CHANGELOG_LINES_WC=`git diff origin/master -- ChangeLog | wc -l` ;
+                  if [[ ${CHANGELOG_LINES_WC} -eq "0" && ${CI_PIPELINE_SOURCE} == "merge_request_event" ]] ; then
+                          echo -e "\n\e[91m===\n*** ERROR *** The ChangeLog file was not updated in this Merge Request.\nPlease make sure to update ChangeLog with your latest changes.\nA short one line description with information about what was changed will suffice.\nPlease add it in the appropriate section near the top of the file, with two spaces at the beginning of the line.\nThe sections were introduced to reduce the number of git rebase conflicts with other Merge Requests, where each is modifying the same ChangeLog.\nPlease add the Merge Request number at the end of your line.\n===\e[0m\n \n";
+                          exit 1 ;
+                  else
+                          echo -e "\n\e[92m===\nNice, the ChangeLog has $CHANGELOG_LINES lines added\n===\e[0m\n" ;
+                          git diff origin/master -- ChangeLog ;
+                  fi;
+                  echo -e "\n\e[92m===\nclang-format version is $CLANG_VERSION \n===\e[0m\n" ;
+                  scripts/clang-formatter.sh ./ ;
+                  scripts/python-formatter.sh ./ --allow-dirty ;
+                  export CHANGED_LINES=`git diff -w --shortstat | sed -e 's/^.*,\s\([0-9]\+\)\sdeletion.*$/\1/g'` ;
+                  echo "CHANGED_LINES = "$CHANGED_LINES ;
+                  if [[ ${CHANGED_LINES} -ge "150" ]] ; then
+                          echo -e "\n\e[91m===\n*** ERROR *** formating with clang and yapf produces very different output.\nYou can use command\n\n    scripts/clang-formatter.sh \$YOUR_FILE\n\nor for Python scripts\n\n    scripts/python-formatter.sh \$YOUR_PYTHON_FILE\n\nto fix this.\nIt is possible that some other files will be modified, because apparently different versions of clang-format have (very small) differences in the output.\n===\e[0m\n \n";
+                          echo -e "\n\e[96m===\n*** NOTE *** if your formatting is better than what clang-format or yapf provides, you can use:\n\n    // clang-format off\n    ......\n    // clang-format on\n\nfor C++ files (like it is done with YADE_CLASS_* macros in all .hpp files),\n\nor for Python code:\n\n    # yapf: disable\n    ......\n    # yapf: enable\n\n===\e[0m\n";
+                          echo -e "\n \n\e[95m*** See the most affected files below ***\e[0m\n \n" ;
+                          git diff --stat ;
+                          git diff -w --stat ;
+                          echo -e "\n \n\e[95mLines\nAdded | Removed\e[0m\n" ;
+                          git diff --numstat ;
+                          echo -e "\n \n\e[95m*** Full 'git diff' is in artifacts path ./install/reformat.txt ***\e[0m\n" ;
+                          echo -e "\e[95m*** Apart from 'scripts/clang-formatter.sh ./', you also can download the diff and use the following command ***\e[0m\n" ;
+                          echo -e "\e[95m    patch -p1 < ./reformat.txt\e[0m\n \n" ;
+                          git diff > ./install/reformat.txt ;
+                          exit 1 ;
+                  else
+                          echo -e "\n\e[92m===\nclang-format check OK\n===\e[0m\n" ;
+                  fi;
+                  git reset --hard ;
+                  git status ;
+                  /usr/bin/find . -type f -print0 | xargs -0 dos2unix -q;
+                  export CHANGED_LINE_ENDINGS=`git diff --shortstat | sed -e 's/^.*,\s\([0-9]\+\)\sdeletion.*$/\1/g'` ;
+                  echo "CHANGED_LINE_ENDINGS = "$CHANGED_LINE_ENDINGS ;
+                  if [[ ${CHANGED_LINE_ENDINGS} -ge "10" ]] ; then
+                          echo -e "\n\e[91m===\n*** ERROR *** Following files have non-unix line endings.\nWe require unix line endings, for reasoning see https://gitlab.com/yade-dev/trunk/-/merge_requests/783 \n===\e[0m\n \n";
+                          git diff --numstat ;
+                          exit 1 ;
+                  else
+                          echo -e "\n\e[92m===\nLine endings check OK\n===\e[0m\n" ;
+                  fi;
+          else
+                  echo -e "\n\e[93m===\nSkipping  clang-format check (disabled or version too old)\n===\e[0m\n" ;
+          fi;
+      else
+          echo -e "\n\e[93m===\nSkipping  clang-format check (can't find clang-format)\n===\e[0m\n" ;
+      fi;
+    # remove any clang formatting changes
+    - git diff -w
+    - git reset --hard
+    - git diff
+    - git status
+    - git log --oneline -n 5
+    # OK source code is as it should be.
+    - export GCC_COLORS="error=01;31:warning=01;35:note=01;36:range1=04;32:range2=04;34:locus=93:quote=07;96:fixit-insert=92:fixit-delete=91:diff-filename=01;91:diff-hunk=33:diff-delete=31:diff-insert=32"
+    - export CXXFLAGS="-fdiagnostics-color=always $CXXFLAGS"
+    - echo $CXXFLAGS
+    - mkdir build && cd build
+    - echo $EXTRA_CMAKE_ARGS
+    - cmake -DSUFFIX=-ci -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_VERBOSE_MAKEFILE=ON -DCMAKE_INSTALL_PREFIX=../install  $EXTRA_CMAKE_ARGS -DPYTHON_VERSION=3 -DDISABLE_SAVE_TEMPS=1 ..
+    - export LINK_GOLD=$(case    $CI_PIPELINE_SOURCE in "merge_request_event") echo "20" ;; *) echo "10";; esac)
+    - export LINK_REGULAR=$(case $CI_PIPELINE_SOURCE in "merge_request_event") echo "10" ;; *) echo "20";; esac)
+    - ld --version
+    - if grep -q "Arch Linux" /etc/lsb-release; then echo "skip ld setting"; else update-alternatives --install "/usr/bin/ld" "ld" "/usr/bin/ld.gold" $LINK_GOLD   ; fi
+    - if grep -q "Arch Linux" /etc/lsb-release; then echo "skip ld setting"; else update-alternatives --install "/usr/bin/ld" "ld" "/usr/bin/ld.bfd" $LINK_REGULAR ; fi
+    - ld --version
+    # 4pak has 64cores 256GB RAM, and has concurrent = 5 ← amount of simultaneous gitlab jobs
+    # 6pak has 48cores 128GB RAM, and has concurrent = 3 , but 6pak must have a little smaller load than the maximum
+    # 7pak has 48cores 128GB RAM, and has concurrent = 4
+    # The goal is to maximize effciency while at the same time the occasionall very heavy jobs (recompilation where ccache can't help) must not bring down the server to halt.
+    # So let's assume that JOBSUM*concurrent < 1.3*cores and examine how this works out.
+    # Current measurements indicate that non-ccached recompilation full CI job is 34 minutes, while ccached one can be as low as 10 minutes.
+    - export JOBSNUM=$(case $CI_RUNNER_DESCRIPTION in
+        "y4pak") echo "12" ;;
+        "c4pak") echo "12" ;;
+        "y6pak") echo "7" ;;
+        "c6pak") echo "7" ;;
+        "y7pak") echo "7" ;;
+        "c7pak") echo "7" ;;
+        "y8pak") echo "5"  ;;
+        "c8pak") echo "5"  ;;
+        "y9pak") echo "5"  ;;
+        "c9pak") echo "5"  ;;
+        "atak0") echo "2"  ;;
+        "yade-runner") echo "12" ;;
+        "yade-runner-01") echo "1" ;;
+        *) echo "4";;
+        esac)
+    - echo $JOBSNUM
+    # Don't touch ~/.ccache/ccache.conf , edit them locally on the server.
+    # Check that it's correct:
+    - cat ~/.ccache/ccache.conf
+    - ccache -s
+    - make install -j $JOBSNUM
+    - make clean
+    - ccache -s
+    - cd ../build
+    - if [[ ${TESTS_AFTER_MAKE} == "TESTS_AFTER_MAKE" ]] ; then xvfb-run -s "-screen 0 1600x1200x24" make doc; fi
+    - cd ..
+    - if [[ ${TESTS_AFTER_MAKE} == "TESTS_AFTER_MAKE" ]] ; then echo -e "\n===\n\e[44mSingle core test yade --test\e[0m\n===\n"; install/bin/yade-ci --test ; fi
+    - if [[ ${TESTS_AFTER_MAKE} == "TESTS_AFTER_MAKE" ]] ; then echo -e "\n===\n\e[44mSingle core check yade --checkall\e[0m\n===\n"; install/bin/yade-ci --checkall; fi
+    - if [[ ${TESTS_AFTER_MAKE} == "TESTS_AFTER_MAKE" ]] ; then echo -e "\n===\n\e[44mParallel check yade -j4 --checkall\e[0m\n===\n"; install/bin/yade-ci -j5 --checkall; fi
+    - if [[ ${TESTS_AFTER_MAKE} == "TESTS_AFTER_MAKE" ]] ; then xvfb-run -a -s "-screen 0 1600x1200x24" scripts/checks-and-tests/gui/testGui.sh; fi
+    - if [[ ${TESTS_AFTER_MAKE} == "TESTS_AFTER_MAKE" ]] ; then install/bin/yade-ci --quickperformance -j8; fi
+    - cat /etc/os-release
+    - if grep -q "Arch Linux" /etc/lsb-release; then /usr/sbin/uname -m; else  /usr/bin/dpkg --print-architecture ; fi
+    - echo -e "\n\e[93m===\n(make_minimal only) scripts/clang-formatter.sh and scripts/python-formatter.sh report CHANGED_LINES = "$CHANGED_LINES"\n===\e[0m\n";
+    - echo -e "\n\e[93m===\n(make_minimal only) ChangeLog diff had CHANGELOG_LINES = "$CHANGELOG_LINES" lines added in this merge request\n===\e[0m\n";
+  tags:
+    - fast
+
+.artifacts_template: &artifacts_definition
+  artifacts:
+    when: always
+    paths:
+      - install
+    expire_in: 2 weeks
+
+# 2.1 build stage
+
+make_18_04:
+  <<: *make_definition
+  <<: *skip_WIP
+  artifacts:
+    paths:
+      - install
+      - build
+    expire_in: 2 weeks
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu18.04
+
+make_20_04:
+  <<: *make_definition
+  <<: *artifacts_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu20.04
+
+make_22_04:
+  <<: *make_definition
+  <<: *artifacts_definition
+  artifacts:
+    paths:
+      - install
+      - build
+    expire_in: 2 weeks
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu22.04
+
+make_24_04:
+  <<: *make_definition
+  <<: *artifacts_definition
+  artifacts:
+    paths:
+      - install
+      - build
+    expire_in: 2 weeks
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu24.04
+
+make_bullseye:
+  <<: *make_definition
+  <<: *artifacts_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+
+make_bookworm:
+  <<: *make_definition
+  <<: *artifacts_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bookworm
+
+make_trixie:
+  <<: *make_definition
+  <<: *artifacts_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-trixie
+
+make_archlinux:
+  <<: *make_definition
+  <<: *artifacts_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:archlinux-current
+  allow_failure: true
+
+mk_bll_ppc64el:
+  <<: *make_definition
+  <<: *artifacts_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye-ppc64el
+  tags:
+    - fast
+    - qemu
+
+mk_bll_arm64:
+  <<: *make_definition
+  <<: *artifacts_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye-arm64
+  tags:
+    - fast
+    - qemu
+
+mk_bookw_arm64:
+  <<: *make_definition
+  <<: *artifacts_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bookworm-arm64
+  tags:
+    - fast
+    - qemu
+
+make_no_mpi:
+  <<: *make_definition
+  <<: *artifacts_definition
+  <<: *skip_WIP_and_Draft
+  before_script:
+    - export EXTRA_CMAKE_ARGS="-DENABLE_MPI=OFF $EXTRA_CMAKE_ARGS"
+    - echo $EXTRA_CMAKE_ARGS
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+
+make_no_vtk:
+  <<: *make_definition
+  <<: *artifacts_definition
+  <<: *skip_WIP_and_Draft
+  before_script:
+    - export EXTRA_CMAKE_ARGS="-DENABLE_VTK=OFF $EXTRA_CMAKE_ARGS"
+    - echo $EXTRA_CMAKE_ARGS
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+
+# using -Ofast native must be tested on the same CPU where it was compiled. So build & test must be in a single job.
+make_fast:
+  <<: *make_definition
+  <<: *skip_WIP_and_Draft
+  artifacts:
+    when: always
+    paths:
+      - screenshots
+  before_script:
+    # there can be only one before_script:, so the line below cannot be in a separate template
+    - export TESTS_AFTER_MAKE="TESTS_AFTER_MAKE"
+    - export EXTRA_CMAKE_ARGS="-DENABLE_FAST_NATIVE=ON $EXTRA_CMAKE_ARGS"
+    - echo $EXTRA_CMAKE_ARGS
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+
+make_debug:
+  <<: *make_definition
+  <<: *skip_WIP_and_Draft
+  artifacts:
+    when: always
+    paths:
+      - screenshots
+  before_script:
+    # there can be only one before_script:, so the line below cannot be in a separate template
+    - export TESTS_AFTER_MAKE="TESTS_AFTER_MAKE"
+    - export EXTRA_CMAKE_ARGS="-DDEBUG=ON $EXTRA_CMAKE_ARGS"
+    - echo $EXTRA_CMAKE_ARGS
+    - export CXXFLAGS="-O2 $CXXFLAGS"
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+
+make_asan:
+  <<: *make_definition
+  <<: *skip_WIP
+  before_script:
+    # there can be only one before_script:, so the line below cannot be in a separate template
+    - export TESTS_AFTER_MAKE="TESTS_AFTER_MAKE"
+    - export EXTRA_CMAKE_ARGS="-DENABLE_USEFUL_ERRORS=0 -DENABLE_ASAN=1 $EXTRA_CMAKE_ARGS"
+    - echo $EXTRA_CMAKE_ARGS
+    - export ASAN_OPTIONS=detect_leaks=0:log_path=stdout:verify_asan_link_order=false
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  tags:
+    - debug
+  artifacts:
+    when: always
+    paths:
+      - screenshots
+
+make_asan_HP:
+  <<: *make_definition
+  <<: *skip_WIP_and_Draft
+  before_script:
+    - export TESTS_AFTER_MAKE="TESTS_AFTER_MAKE"
+    # it is expensive to run 5 ASAN tests. So instead run only one, but pick from available decimal places based on the job id.
+    - echo $CI_JOB_ID
+    - export TEST_DECIMAL_PLACES=$(case $(( $CI_JOB_ID % 5 )) in
+        "0") echo "18"  ;;
+        "1") echo "33"  ;;
+        "2") echo "45"  ;;
+        "3") echo "150" ;;
+        "4") echo "45"  ;;
+        *)   echo "6"   ;;
+      esac)
+    - export TEST_USE_MPFR=$(case $(( $CI_JOB_ID % 5 )) in
+        "0") echo "OFF" ;;
+        "1") echo "OFF" ;;
+        "2") echo "ON"  ;;
+        "3") echo "ON"  ;;
+        "4") echo "OFF" ;;
+        *)   echo "OFF" ;;
+        esac)
+    - echo "TEST_DECIMAL_PLACES="$TEST_DECIMAL_PLACES
+    - echo "TEST_USE_MPFR="$TEST_USE_MPFR
+    - export EXTRA_CMAKE_ARGS="-DENABLE_USEFUL_ERRORS=0 -DENABLE_ASAN=1 -DREAL_DECIMAL_PLACES=$TEST_DECIMAL_PLACES -DENABLE_MPFR=$TEST_USE_MPFR $EXTRA_CMAKE_ARGS"
+    - echo $EXTRA_CMAKE_ARGS
+    - export ASAN_OPTIONS=detect_leaks=0:log_path=stdout:verify_asan_link_order=false
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  tags:
+    - debug
+  artifacts:
+    when: always
+    paths:
+      - screenshots
+  timeout: 10 hours
+
+make_minimal:
+  <<: *make_definition
+  <<: *artifacts_definition
+  <<: *skip_WIP
+  before_script:
+    - export EXTRA_CMAKE_ARGS="-DENABLE_VTK=OFF -DENABLE_MPI=OFF -DENABLE_GUI=OFF -DENABLE_GTS=OFF -DENABLE_TWOPHASEFLOW=OFF -DENABLE_PARTIALSAT=OFF -DENABLE_CGAL=OFF -DENABLE_FEMLIKE=OFF -DENABLE_LBMFLOW=OFF -DENABLE_POTENTIAL_BLOCKS=OFF -DENABLE_POTENTIAL_PARTICLES=OFF -DENABLE_GL2PS=OFF -DENABLE_LOGGER=OFF -DENABLE_OPENMP=OFF -DENABLE_THERMAL=OFF -DENABLE_LS_DEM=OFF $EXTRA_CMAKE_ARGS"
+    - echo $EXTRA_CMAKE_ARGS
+    - export CHECK_FORMAT="CHECK_FORMAT"
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+
+make_unity:
+  <<: *make_definition
+  <<: *artifacts_definition
+  <<: *skip_WIP
+  before_script:
+    - export EXTRA_CMAKE_ARGS="-DCMAKE_UNITY_BUILD=ON -DCMAKE_UNITY_BUILD_BATCH_SIZE=3000 $EXTRA_CMAKE_ARGS"
+    - echo $EXTRA_CMAKE_ARGS
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu24.04
+
+# _opposite means that all non-minimal options (options that do not reduce significantly amount of compiled code) are set to the setting opposite to the default one
+make_opposite:
+  <<: *make_definition
+  <<: *artifacts_definition
+  <<: *skip_WIP
+  before_script:
+    - export EXTRA_CMAKE_ARGS="-DENABLE_LOGGER=OFF -DENABLE_MASK_ARBITRARY=ON -DENABLE_COMPLEX_MP=OFF -DENABLE_OPENMP=OFF -DENABLE_LIQMIGRATION=ON -DENABLE_PROFILING=ON -DENABLE_SPH=ON -DENABLE_DEFORM=ON $EXTRA_CMAKE_ARGS"
+    - echo $EXTRA_CMAKE_ARGS
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+
+make_suse15:
+  <<: *make_definition
+  <<: *artifacts_definition
+  <<: *skip_WIP
+  before_script:
+    - export CXXFLAGS="-Wno-int-in-bool-context -Wno-comment $CXXFLAGS"
+    - echo $CXXFLAGS
+  image: registry.gitlab.com/yade-dev/docker-yade:suse15
+
+make_18_04_nogui:
+  <<: *make_definition
+  <<: *artifacts_definition
+  <<: *skip_WIP_and_Draft
+  before_script:
+    - export EXTRA_CMAKE_ARGS="-DENABLE_GUI=OFF $EXTRA_CMAKE_ARGS"
+    - echo $EXTRA_CMAKE_ARGS
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu18.04_nogui
+
+make_clang:
+  <<: *make_definition
+  <<: *artifacts_definition
+  <<: *skip_WIP
+  before_script:
+    - export CC="/usr/bin/clang-11"
+    - export CXX="/usr/bin/clang++-11"
+    # We should escape disabling features for the clang-build. Clang should work exactly like gcc.
+    - export EXTRA_CMAKE_ARGS="-DENABLE_USEFUL_ERRORS=0 $EXTRA_CMAKE_ARGS"
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+
+## High precision - testing debian bullseye
+
+mkHP_float:
+  <<: *make_definition
+  <<: *artifacts_definition
+  <<: *skip_WIP_and_Draft
+  before_script:
+    - export EXTRA_CMAKE_ARGS="-DREAL_DECIMAL_PLACES=6 $EXTRA_CMAKE_ARGS"
+    - echo $EXTRA_CMAKE_ARGS
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+
+mkHP_long_double:
+  <<: *make_definition
+  <<: *artifacts_definition
+  before_script:
+    - export EXTRA_CMAKE_ARGS="-DREAL_DECIMAL_PLACES=18 $EXTRA_CMAKE_ARGS"
+    - echo $EXTRA_CMAKE_ARGS
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+
+mkHP_float128:
+  <<: *make_definition
+  <<: *artifacts_definition
+  <<: *skip_WIP
+  before_script:
+    - export EXTRA_CMAKE_ARGS="-DREAL_DECIMAL_PLACES=33 $EXTRA_CMAKE_ARGS"
+    - echo $EXTRA_CMAKE_ARGS
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+
+mkHP_mpfr150:
+  <<: *make_definition
+  <<: *artifacts_definition
+  <<: *skip_WIP_and_Draft
+  before_script:
+    - export EXTRA_CMAKE_ARGS="-DREAL_DECIMAL_PLACES=150 -DENABLE_MPFR=ON $EXTRA_CMAKE_ARGS"
+    - echo $EXTRA_CMAKE_ARGS
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+
+mkHP_bf45:
+  <<: *make_definition
+  <<: *artifacts_definition
+  <<: *skip_WIP_and_Draft
+  before_script:
+    - export EXTRA_CMAKE_ARGS="-DREAL_DECIMAL_PLACES=45 -DENABLE_MPFR=OFF $EXTRA_CMAKE_ARGS"
+    - echo $EXTRA_CMAKE_ARGS
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+
+## High precision - all tests done.
+
+make_SSE:
+  <<: *make_definition
+  <<: *artifacts_definition
+  <<: *skip_WIP_and_Draft
+  before_script:
+    - export EXTRA_CMAKE_ARGS="-DVECTORIZE=ON $EXTRA_CMAKE_ARGS"
+    - echo $EXTRA_CMAKE_ARGS
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+
+# 3.1. test stage
+.test_template: &test_definition
+  <<: *platforms_definition
+  <<: *gitlab_runner_retry_definition
+  stage: test
+  script:
+    - cd ./data
+    - git log --oneline -n 5
+    - cd ..
+    - export PYTHONUNBUFFERED=1
+    - install/bin/yade-ci --test
+    - if [[ ${NO_GUI} == "NO_GUI" ]] ; then echo -e "\n\e[93m===\nSkipping GUI test.\n===\e[0m\n"; else xvfb-run -a -s "-screen 0 1600x1200x24" scripts/checks-and-tests/gui/testGui.sh; fi
+    - install/bin/yade-ci --quickperformance -j8
+    - cat /etc/os-release
+    - if grep -q "Arch Linux" /etc/lsb-release; then /usr/sbin/uname -m; else  /usr/bin/dpkg --print-architecture ; fi
+  timeout: 30 minutes
+  artifacts:
+    when: always
+    paths:
+      - screenshots
+
+test_18_04:
+  <<: *test_definition
+  <<: *skip_WIP
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu18.04
+  dependencies:
+    - make_18_04
+  needs: ["make_18_04"]
+
+test_20_04:
+  <<: *test_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu20.04
+  dependencies:
+    - make_20_04
+  needs: ["make_20_04"]
+
+test_22_04:
+  <<: *test_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu22.04
+  dependencies:
+    - make_22_04
+  needs: ["make_22_04"]
+
+test_24_04:
+  <<: *test_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu24.04
+  dependencies:
+    - make_24_04
+  needs: ["make_24_04"]
+
+test_bullseye:
+  <<: *test_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - make_bullseye
+  needs: ["make_bullseye"]
+
+test_bookworm:
+  <<: *test_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bookworm
+  dependencies:
+    - make_bookworm
+  needs: ["make_bookworm"]
+
+test_trixie:
+  <<: *test_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-trixie
+  dependencies:
+    - make_trixie
+  needs: ["make_trixie"]
+
+test_archlinux:
+  <<: *test_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:archlinux-current
+  allow_failure: true
+  dependencies:
+    - make_archlinux
+  needs: ["make_archlinux"]
+
+tst_bll_ppc64el:
+  <<: *test_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye-ppc64el
+  dependencies:
+    - mk_bll_ppc64el
+  needs: ["mk_bll_ppc64el"]
+  tags:
+    - qemu
+  timeout: 55 minutes
+
+tst_bll_arm64:
+  <<: *test_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye-arm64
+  dependencies:
+    - mk_bll_arm64
+  needs: ["mk_bll_arm64"]
+  tags:
+    - qemu
+  timeout: 55 minutes
+
+tst_bookw_arm64:
+  <<: *test_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bookworm-arm64
+  dependencies:
+    - mk_bookw_arm64
+  needs: ["mk_bookw_arm64"]
+  tags:
+    - qemu
+  timeout: 55 minutes
+
+test_no_mpi:
+  <<: *test_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - make_no_mpi
+  needs: ["make_no_mpi"]
+
+test_no_vtk:
+  <<: *test_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - make_no_vtk
+  needs: ["make_no_vtk"]
+
+test_minimal:
+  <<: *test_definition
+  <<: *skip_GUI_TEST
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - make_minimal
+  needs: ["make_minimal"]
+
+test_opposite:
+  <<: *test_definition
+  <<: *skip_WIP
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - make_opposite
+  needs: ["make_opposite"]
+
+test_suse15:
+  <<: *test_definition
+  <<: *skip_GUI_TEST
+  <<: *skip_WIP
+  image: registry.gitlab.com/yade-dev/docker-yade:suse15
+  dependencies:
+    - make_suse15
+  needs: ["make_suse15"]
+
+test_18_04_nogui:
+  <<: *test_definition
+  <<: *skip_GUI_TEST
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu18.04_nogui
+  dependencies:
+    - make_18_04_nogui
+  needs: ["make_18_04_nogui"]
+
+test_clang:
+  <<: *test_definition
+  <<: *skip_WIP
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - make_clang
+  needs: ["make_clang"]
+
+## High precision - testing debian bullseye
+
+tstHP_long_double:
+  <<: *test_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - mkHP_long_double
+  needs: ["mkHP_long_double"]
+  timeout: 4 hours
+
+tstHP_float128:
+  <<: *test_definition
+  <<: *skip_WIP
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - mkHP_float128
+  needs: ["mkHP_float128"]
+  timeout: 4 hours
+
+tstHP_mpfr150:
+  <<: *test_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - mkHP_mpfr150
+  needs: ["mkHP_mpfr150"]
+  timeout: 4 hours
+
+tstHP_bf45:
+  <<: *test_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - mkHP_bf45
+  needs: ["mkHP_bf45"]
+  timeout: 4 hours
+
+## High precision - all tests done.
+
+test_SSE:
+  <<: *test_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - make_SSE
+  needs: ["make_SSE"]
+  
+## 3.1.2 Yade-OFoam sub-section (for clarity) - there is room for template magic in the "script" part
+
+test_22_foam2312:
+  <<: *platforms_definition
+  <<: *gitlab_runner_retry_definition
+  <<: *skip_WIP
+  stage: test
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu22.04_foam2312
+  dependencies:
+    - make_22_04
+  needs: ["make_22_04"]
+  timeout: 25 minutes
+  script:
+    - export PYTHONUNBUFFERED=1
+    - cat /etc/os-release
+    - export OMPI_MCA_btl_vader_single_copy_mechanism=none
+    - pwd
+    - scripts/checks-and-tests/testOpenFoam.sh
+
+test_22_foam2306:
+  <<: *platforms_definition
+  <<: *gitlab_runner_retry_definition
+  <<: *skip_WIP
+  stage: test
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu22.04_foam2312
+  dependencies:
+    - make_22_04
+  needs: ["make_22_04"]
+  timeout: 25 minutes
+  script:
+    - export PYTHONUNBUFFERED=1
+    - cat /etc/os-release
+    - export OMPI_MCA_btl_vader_single_copy_mechanism=none
+    - pwd
+    - apt-get update && apt-get install -y openfoam2306-default
+    - source /usr/lib/openfoam/openfoam2306/etc/bashrc && scripts/checks-and-tests/testOpenFoam.sh
+
+test_22_foam2212:
+  <<: *platforms_definition
+  <<: *gitlab_runner_retry_definition
+  <<: *skip_WIP
+  stage: test
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu22.04_foam2312
+  dependencies:
+    - make_22_04
+  needs: ["make_22_04"]
+  timeout: 25 minutes
+  script:
+    - export PYTHONUNBUFFERED=1
+    - cat /etc/os-release
+    - export OMPI_MCA_btl_vader_single_copy_mechanism=none
+    - pwd
+    - apt-get update && apt-get install -y openfoam2212-default
+    - ls /usr/lib/openfoam/
+    - set -x
+    - script -q /dev/null source /usr/lib/openfoam/openfoam2212/etc/bashrc
+    - ls /usr/lib/openfoam/
+    - scripts/checks-and-tests/testOpenFoam.sh
+
+test_22_foam2112:
+  <<: *platforms_definition
+  <<: *gitlab_runner_retry_definition
+  <<: *skip_WIP
+  stage: test
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu22.04_foam2312
+  dependencies:
+    - make_22_04
+  needs: ["make_22_04"]
+  timeout: 25 minutes
+  before_script:
+    - export NO_GUI="NO_GUI"
+    - apt-get update && apt-get install -y openfoam2112-default
+  script:
+    - export PYTHONUNBUFFERED=1
+    - cat /etc/os-release
+    - export OMPI_MCA_btl_vader_single_copy_mechanism=none
+    - pwd
+    - source /usr/lib/openfoam/openfoam2112/etc/bashrc && scripts/checks-and-tests/testOpenFoam.sh
+
+test_22_foam2006:
+  <<: *platforms_definition
+  <<: *gitlab_runner_retry_definition
+  <<: *skip_WIP
+  stage: test
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu22.04_foam2312
+  dependencies:
+    - make_22_04
+  needs: ["make_22_04"]
+  timeout: 25 minutes
+  before_script:
+    - export NO_GUI="NO_GUI"
+    - apt-get update && apt-get install -y openfoam2006-default
+  script:
+    - export PYTHONUNBUFFERED=1
+    - cat /etc/os-release
+    - export OMPI_MCA_btl_vader_single_copy_mechanism=none
+    - pwd
+    - source /usr/lib/openfoam/openfoam2006/etc/bashrc && scripts/checks-and-tests/testOpenFoam.sh
+
+test_22_foam11:
+  <<: *platforms_definition
+  <<: *gitlab_runner_retry_definition
+  <<: *skip_WIP
+  stage: test
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu22.04_foam2312
+  dependencies:
+    - make_22_04
+  needs: ["make_22_04"]
+  timeout: 25 minutes
+  before_script:
+    - export NO_GUI="NO_GUI"
+    - sh -c "wget -O - https://dl.openfoam.org/gpg.key > /etc/apt/trusted.gpg.d/openfoam.asc"
+    - add-apt-repository http://dl.openfoam.org/ubuntu
+    - apt-get update && apt-get -y install openfoam11
+  script:
+    - export PYTHONUNBUFFERED=1
+    - cat /etc/os-release
+    - export OMPI_MCA_btl_vader_single_copy_mechanism=none
+    - pwd
+    - source /opt/openfoam11/etc/bashrc && scripts/checks-and-tests/testOpenFoam.sh
+
+test_22_foam10:
+  <<: *platforms_definition
+  <<: *gitlab_runner_retry_definition
+  <<: *skip_WIP
+  stage: test
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu22.04_foam2312
+  dependencies:
+    - make_22_04
+  needs: ["make_22_04"]
+  timeout: 25 minutes
+  before_script:
+    - export NO_GUI="NO_GUI"
+    - sh -c "wget -O - https://dl.openfoam.org/gpg.key > /etc/apt/trusted.gpg.d/openfoam.asc"
+    - add-apt-repository http://dl.openfoam.org/ubuntu
+    - apt-get update && apt-get -y install openfoam10
+  script:
+    - export PYTHONUNBUFFERED=1
+    - cat /etc/os-release
+    - export OMPI_MCA_btl_vader_single_copy_mechanism=none
+    - pwd
+    - source /opt/openfoam10/etc/bashrc && scripts/checks-and-tests/testOpenFoam.sh
+  
+  
+
+
+# 3.2. check stage
+.check_template: &check_definition
+  <<: *platforms_definition
+  <<: *gitlab_runner_retry_definition
+  stage: test
+#  before_script:
+#    - export OMPI_MCA_rmaps_base_oversubscribe=1
+#    - export OMPI_MCA_btl_vader_single_copy_mechanism=none
+#    - export OMPI_MCA_mpi_yield_when_idle=1 #degraded mode when oversubscribing (https://www.open-mpi.org/faq/?category=running#oversubscribing)
+  script:
+    - cd ./data
+    - git log --oneline -n 5
+    - cd ..
+    - export PYTHONUNBUFFERED=1
+    - echo -e "\n===\n\e[44mSingle core check yade --checkall\e[0m\n===\n"
+    - install/bin/yade-ci --checkall
+    - echo -e "\n===\n\e[44mParallel check yade -j4 --checkall\e[0m\n===\n"
+    - install/bin/yade-ci -j4 --checkall
+    - cat /etc/os-release
+    - if grep -q "Arch Linux" /etc/lsb-release; then /usr/sbin/uname -m; else  /usr/bin/dpkg --print-architecture ; fi
+  timeout: 35 minutes
+
+check_18_04:
+  <<: *check_definition
+  <<: *skip_WIP
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu18.04
+  dependencies:
+    - make_18_04
+  needs: ["make_18_04"]
+
+check_20_04:
+  <<: *check_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu20.04
+  dependencies:
+    - make_20_04
+  needs: ["make_20_04"]
+
+check_22_04:
+  <<: *check_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu22.04
+  dependencies:
+    - make_22_04
+  needs: ["make_22_04"]
+
+check_24_04:
+  <<: *check_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu24.04
+  dependencies:
+    - make_24_04
+  needs: ["make_24_04"]
+
+check_bullseye:
+  <<: *check_definition
+  before_script:
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - make_bullseye
+  needs: ["make_bullseye"]
+
+check_bookworm:
+  <<: *check_definition
+  before_script:
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bookworm
+  dependencies:
+    - make_bookworm
+  needs: ["make_bookworm"]
+
+check_trixie:
+  <<: *check_definition
+  before_script:
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-trixie
+  dependencies:
+    - make_trixie
+  needs: ["make_trixie"]
+
+check_archlinux:
+  <<: *check_definition
+  before_script:
+  image: registry.gitlab.com/yade-dev/docker-yade:archlinux-current
+  allow_failure: true
+  dependencies:
+    - make_archlinux
+  needs: ["make_archlinux"]
+
+ck_bll_ppc64el:
+  <<: *check_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye-ppc64el
+  dependencies:
+    - mk_bll_ppc64el
+  needs: ["mk_bll_ppc64el"]
+  tags:
+    - qemu
+  timeout: 3 hours
+
+ck_bll_arm64:
+  <<: *check_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye-arm64
+  dependencies:
+    - mk_bll_arm64
+  needs: ["mk_bll_arm64"]
+  tags:
+    - qemu
+  timeout: 3 hours
+
+ck_bookw_arm64:
+  <<: *check_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bookworm-arm64
+  dependencies:
+    - mk_bookw_arm64
+  needs: ["mk_bookw_arm64"]
+  tags:
+    - qemu
+  timeout: 3 hours
+
+check_no_mpi:
+  <<: *check_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - make_no_mpi
+  needs: ["make_no_mpi"]
+
+check_no_vtk:
+  <<: *check_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - make_no_vtk
+  needs: ["make_no_vtk"]
+
+check_minimal:
+  <<: *check_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - make_minimal
+  needs: ["make_minimal"]
+
+check_opposite:
+  <<: *check_definition
+  <<: *skip_WIP
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - make_opposite
+  needs: ["make_opposite"]
+
+check_suse15:
+  <<: *check_definition
+  <<: *skip_WIP
+  image: registry.gitlab.com/yade-dev/docker-yade:suse15
+  dependencies:
+    - make_suse15
+  needs: ["make_suse15"]
+
+check_clang:
+  <<: *check_definition
+  <<: *skip_WIP
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - make_clang
+  needs: ["make_clang"]
+
+## High precision - testing debian bullseye
+
+ckHP_long_double:
+  <<: *check_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - mkHP_long_double
+  needs: ["mkHP_long_double"]
+  timeout: 5 hours
+
+ckHP_float128:
+  <<: *check_definition
+  <<: *skip_WIP
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - mkHP_float128
+  needs: ["mkHP_float128"]
+  timeout: 5 hours
+
+ckHP_mpfr150:
+  <<: *check_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - mkHP_mpfr150
+  needs: ["mkHP_mpfr150"]
+  timeout: 9 hours
+
+ckHP_bf45:
+  <<: *check_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - mkHP_bf45
+  needs: ["mkHP_bf45"]
+  timeout: 9 hours
+
+## High precision - all tests done.
+
+check_SSE:
+  <<: *check_definition
+  <<: *skip_WIP_and_Draft
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  dependencies:
+    - make_SSE
+  needs: ["make_SSE"]
+
+.doc_template: &doc_definition
+  <<: *platforms_definition
+  script:
+    - export PYTHONUNBUFFERED=1
+    - cd build
+    - xvfb-run -s "-screen 0 1600x1200x24" make doc
+  stage: test
+  timeout: 45 minutes
+  artifacts:
+    paths:
+      - install
+
+# 4. doc stage
+
+doc_24_04:
+  <<: *doc_definition
+  <<: *skip_WIP
+  <<: *gitlab_runner_retry_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu24.04
+  dependencies:
+    - make_24_04
+  needs: ["make_24_04"]
+
+# 5. pages stage; uploads documentation to the website
+pages:
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu24.04
+  stage: pages
+  <<: *gitlab_runner_retry_definition
+  only:
+    - master
+  script:
+    - mv install/share/doc/yade-ci/html public
+    - mv install/share/doc/yade-ci/Yade.pdf public
+    - mv install/share/doc/yade-ci/Yade.epub public
+  dependencies:
+    - doc_24_04
+  needs: ["doc_24_04"]
+  artifacts:
+    paths:
+      - public
+
+# 6. build debian packages
+.deb_template: &deb_definition
+  stage: deb
+  <<: *gitlab_runner_retry_definition
+  only:
+    - master
+  script:
+    - export PYTHONUNBUFFERED=1
+    - cd $CI_PROJECT_DIR/deb/yadedaily$PREC_NAME
+    # see comments in make_template, but here give smaller JOBSNUM because this runs on master only, so the cores can be better utilized on merge_request
+    - export JOBSNUM=$(case $CI_RUNNER_DESCRIPTION in
+        "y4pak") echo "11" ;;
+        "c4pak") echo "11" ;;
+        "y6pak") echo "12" ;;
+        "c6pak") echo "12" ;;
+        "y7pak") echo "10" ;;
+        "c7pak") echo "10" ;;
+        "y8pak") echo "5" ;;
+        "c8pak") echo "5" ;;
+        "y9pak") echo "5" ;;
+        "c9pak") echo "5" ;;
+        "yade-runner") echo "12" ;;
+        "yade-runner-01") echo "1" ;;
+        *) echo "8";;
+        esac)
+    - echo $JOBSNUM
+    - export CCACHE_DIR=/root/.ccache
+    - ccache -s
+    - DEB_BUILD_OPTIONS=noddebs dpkg-buildpackage -j$JOBSNUM
+    - rm -rf $CI_PROJECT_DIR/deb/yadedaily$PREC_NAME
+    - ls -l $CI_PROJECT_DIR/deb
+    - ccache -s
+  dependencies: []
+  # this line is to trigger deb building earlier; the "make_minimal" is supposed to finish fastest of all builds.
+  needs: ["make_minimal"]
+  artifacts:
+    paths:
+      - ./deb
+    expire_in: 5 day
+  tags:
+    - fast
+
+deb_bullseye:
+  <<: *deb_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bullseye
+  before_script:
+    - rm -rf ./deb
+    - ./scripts/ppa_ci/builddeb.py -d "bullseye"
+
+deb_bookworm:
+  <<: *deb_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bookworm
+  before_script:
+    - rm -rf ./deb
+    - ./scripts/ppa_ci/builddeb.py -d "bookworm"
+
+deb_bookworm_long_double:
+  <<: *deb_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bookworm
+  before_script:
+    - rm -rf ./deb
+    - export PREC_NAME="-long-double"
+    - ./scripts/ppa_ci/builddeb.py -d "bookworm" -p "long-double"
+
+deb_bookworm_float128:
+  <<: *deb_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bookworm
+  before_script:
+    - rm -rf ./deb
+    - export PREC_NAME="-float128"
+    - ./scripts/ppa_ci/builddeb.py -d "bookworm" -p "float128"
+
+deb_bookworm_mpfr150:
+  <<: *deb_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-bookworm
+  before_script:
+    - rm -rf ./deb
+    - export PREC_NAME="-mpfr150"
+    - ./scripts/ppa_ci/builddeb.py -d "bookworm" -p "mpfr150"
+  timeout: 9 hours
+
+deb_trixie:
+  <<: *deb_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-trixie
+  before_script:
+    - rm -rf ./deb
+    - ./scripts/ppa_ci/builddeb.py -d "trixie"
+
+deb_trixie_long_double:
+  <<: *deb_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-trixie
+  before_script:
+    - rm -rf ./deb
+    - export PREC_NAME="-long-double"
+    - ./scripts/ppa_ci/builddeb.py -d "trixie" -p "long-double"
+
+deb_trixie_float128:
+  <<: *deb_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-trixie
+  before_script:
+    - rm -rf ./deb
+    - export PREC_NAME="-float128"
+    - ./scripts/ppa_ci/builddeb.py -d "trixie" -p "float128"
+
+deb_trixie_mpfr150:
+  <<: *deb_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:debian-trixie
+  before_script:
+    - rm -rf ./deb
+    - export PREC_NAME="-mpfr150"
+    - ./scripts/ppa_ci/builddeb.py -d "trixie" -p "mpfr150"
+  timeout: 9 hours
+
+deb_bionic:
+  <<: *deb_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu18.04
+  before_script:
+    - rm -rf ./deb
+    - ./scripts/ppa_ci/builddeb.py -d "bionic"
+
+deb_focal:
+  <<: *deb_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu20.04
+  before_script:
+    - rm -rf ./deb
+    - ./scripts/ppa_ci/builddeb.py -d "focal"
+
+deb_jammy:
+  <<: *deb_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu22.04
+  before_script:
+    - rm -rf ./deb
+    - ./scripts/ppa_ci/builddeb.py -d "jammy"
+
+deb_jammy_long_double:
+  <<: *deb_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu22.04
+  before_script:
+    - rm -rf ./deb
+    - export PREC_NAME="-long-double"
+    - ./scripts/ppa_ci/builddeb.py -d "jammy" -p "long-double"
+
+deb_jammy_float128:
+  <<: *deb_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu22.04
+  before_script:
+    - rm -rf ./deb
+    - export PREC_NAME="-float128"
+    - ./scripts/ppa_ci/builddeb.py -d "jammy" -p "float128"
+
+deb_jammy_mpfr150:
+  <<: *deb_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu22.04
+  before_script:
+    - rm -rf ./deb
+    - export PREC_NAME="-mpfr150"
+    - ./scripts/ppa_ci/builddeb.py -d "jammy" -p "mpfr150"
+  timeout: 9 hours
+
+deb_noble:
+  <<: *deb_definition
+  image: registry.gitlab.com/yade-dev/docker-yade:ubuntu24.04
+  before_script:
+    - rm -rf ./deb
+    - ./scripts/ppa_ci/builddeb.py -d "noble"
