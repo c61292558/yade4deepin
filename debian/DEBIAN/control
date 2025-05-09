@@ -1,9 +1,9 @@
-Package: com.wingsummer.winghexexplorer
-Maintainer: 寂静的羽夏(wingsummer)
-Homepage: https://www.cnblogs.com/wingsummer/
+Package: com.yade
+Maintainer: www.yade-dem.org
+Homepage: www.yade-dem.org
 Priority: optional
 Section: utils
-Description: 一个基于 QT 和 DTK 开发的强大的开源免费的十六进制编辑器
+Description: 一个离散元分析软件
 Architecture: amd64
-Depends: python3, deepin-elf-verify (>= 1.1.10-1)
-Version: 2.2.1
+Depends: 
+Version: 2025.2.0

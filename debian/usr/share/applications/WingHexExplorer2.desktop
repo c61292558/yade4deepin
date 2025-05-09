@@ -1,7 +1,7 @@
 [Desktop Entry]
-Name=WingHexExplorer2
-Comment=本软件是基于 QT 编写的十六进制编辑器，采用 C++ 进行开发，提供强大而免费的十六进制编辑器。
-Exec=/opt/winghexexplorer2/run_winghexexplorer2
+Name=Yade
+Comment=Yade是一个开源软件，采用 C++ 和 Python 编写，专注于离散元法（DEM）模拟。它由法国 Lab 3SR-Grenoble 课题组开发，旨在提供一个灵活的框架用于颗粒流的仿真。Yade 的计算部分使用 C++ 编写，允许独立执行新算法，而 Python 则用于快速构建场景和模拟控制。Yade 的开源特性使其成为一个免费的替代商业软件的选择，尽管上手可能稍慢，但其功能强大，受到开发者社区的支持。
+Exec=/opt/yade/run_yade
 Icon=winghex
 Type=Application
 StartupNotify=true
