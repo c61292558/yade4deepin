@@ -1,0 +1,204 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*' 
+    branches:
+      - '**'
+   
+      
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write  # 需要写入Release的权限
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 获取完整提交历史用于版本检测
+        repository: c61292558/WingHexExplorer2
+        token: ${{ secrets.GITHUB_TOKEN }}  # 显式传递自动生成的令牌
+        Workspace-tags: true
+
+   
+    
+    - name: Generate version info
+      id: version
+      run: |
+        # 尝试获取最近的tag，如果没有则生成基于commit的版本号
+        if git describe --tags --abbrev=0 2>/dev/null; then
+          VERSION=$(git describe --tags --abbrev=0)
+        else
+          VERSION="v0.0.0-$(git rev-parse --short HEAD)"
+        fi
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Using version: ${VERSION}"
+        
+      
+      
+    - name: Checkout code submodules
+      uses: actions/checkout@v4
+      with:
+        submodules: 'recursive'
+
+    - name: List files
+      run: ls -la
+      
+    - name: Setup Docker
+      run: |
+        sudo systemctl start docker
+        sudo docker info
+
+    - name: Build Docker container
+      run: |
+        sudo docker run -dit \
+          --name qtbuilder \
+          -v ${{ github.workspace }}:/workspace \
+          linuxdeepin/deepin:23
+
+          
+    
+
+    - name: Check CMakeLists.txt in container
+      run: 
+        sudo docker exec qtbuilder ls -la /workspace/CMakeLists.txt
+    
+    - name: Install dependencies
+      run: |
+        sudo docker exec qtbuilder bash -c "
+        apt update -y && \
+        apt install -y \
+          xz-utils \
+          cmake \
+          build-essential \
+          tree \
+          git \
+          ninja-build \
+          wget \
+          flex \
+          bison \
+          zlib1g-dev \
+          libgmp-dev \
+          libmpfr-dev \
+          libmpc-dev \
+          libgl1-mesa-dev \
+          libx11-dev \
+          libxcb1-dev \
+          libxext-dev \
+          libxfixes-dev \
+          libxi-dev \
+          libxrender-dev \
+          libxkbcommon-dev \
+          libwayland-dev \
+          qt6-base-dev \
+          qt6-base-private-dev \
+          qt6-base-dev-tools \
+          qt6-tools-dev \
+          qt6-tools-dev-tools \
+          qt6-svg-dev \
+          && apt clean"
+        
+    - name: Check compiler version
+      run: |
+        sudo docker exec qtbuilder bash -c "g++ --version"
+        sudo docker exec qtbuilder bash -c "gcc --version"
+
+    - name: Compile project
+      run: |
+        sudo docker exec qtbuilder bash -c "cd /workspace && \
+        mkdir -p build && \
+        cd build && \
+        cmake   .. && \   
+        make "# 编译
+        # 生成 Makefile  del -DCMAKE_CXX_STANDARD=20  cmake --debug-output  , make  VERBOSE=1
+
+    # - name: List files2
+    #   if: failure()  # 仅在失败时运行
+    #   run:  cat ${{github.workspace}}/build/_build/qmsetup_build-Release.log 
+    #   # cat ${{ github.workspace }}/build/CMakeFiles/CMakeOutput.log && ls -l ${{ github.workspace }} && cd ${{ github.workspace }}/build/CMakeFiles && ls -l 
+      
+    # - name: Upload build logs
+    #   if: failure()  # 仅在失败时运行
+    #   uses: actions/upload-artifact@v4
+    #   with:
+    #     name: qmsetup-build-log
+    #     path: |
+    #       ./qmsetup_build.log
+    #     if-no-files-found: warn  # 如果文件不存在仅警告
+
+    # - name: Print qmsetup build log on failure
+    #   if: failure()
+    #   run: cat /build/_build/qmsetup_build-Release.log
+    
+    - name: Debug Git Info # 在 Get version info 步骤之前添加
+      run: |
+        echo "--- Git Status ---"
+        git status
+        echo "--- Recent Commits ---"
+        git log -n 5 --decorate --oneline
+        echo "--- Available Tags ---"
+        git tag -l
+        echo "--- Trying git describe directly ---"
+        git describe --tags --abbrev=0 || echo "Git describe failed here too!"
+
+        
+    # - name: Get version info
+    #   id: version
+    #   run: |
+    #     # 提取最新的tag作为版本号
+    #     VERSION=$(git describe --tags ---abbrev=0 2>/dev/null || echo "v0.0.0")
+    #     echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+
+    - name: chmod +x /opt/winghexexplorer2/run_winghexexplorer2
+      run: |
+        sudo chmod +x debian/opt/winghexexplorer2/run_winghexexplorer2
+        sudo ls -l debian/opt/winghexexplorer2/run_winghexexplorer2
+        
+        
+    - name: Compress build artifacts
+      run: |
+        zip -r build_artifacts.zip build
+
+    - name: List files commp 
+      run: ls -la && echo "-----------------这是编译完之后---------------------------"
+
+    - name: Copy build artifacts to debian package directory
+      run: |
+        cp -r build/* debian/opt/winghexexplorer2/
+    
+    - name: Build DEB package
+      run: |
+        dpkg-deb -Zxz --build  debian "com.wingsummer.winghexexplorer_${{ steps.version.outputs.version }}_amd64.deb"
+
+    
+    
+    - name: List files deb 
+      run: ls -la && echo "-----------------这是打包完之后---------------------------"
+
+    - name: Show debian directory structure
+      run: |
+        echo "Tree structure of debian directory:"
+        tree debian
+
+    - name: Create Release
+      id: create_release
+      uses: softprops/action-gh-release@v1
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}   # 添加此行
+        tag_name: ${{ steps.version.outputs.version }}
+        overwrite: true  # 关键！允许覆盖已有的 Release
+        name: "Release ${{ steps.version.outputs.version }}"
+        draft: false
+        prerelease: false
+        files: |
+          build_artifacts.zip
+          *.deb
+          build/*.app    # 应用程序文件
+          build/*.so     # 动态库文件
+          build/*.dmg    # macOS安装包
+          build/*.exe    # Windows可执行文件
