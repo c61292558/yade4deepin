@@ -69,19 +69,22 @@ jobs:
     
     - name: Install dependencies
       run: |
-        sudo docker exec qtbuilder bash -c "echo 'deb http://archive.ubuntu.com/ubuntu focal main universe' >> /etc/apt/sources.list && \
-        echo 'deb http://archive.ubuntu.com/ubuntu focal-updates main universe' >> /etc/apt/sources.list && \
-        apt update -y && \
-        apt install -y cmake git freeglut3-dev libboost-all-dev fakeroot \
-        dpkg-dev build-essential g++ python3-dev python3-ipython python3-matplotlib \
-        libsqlite3-dev python3-numpy python3-tk gnuplot libgts-dev python3-pygraphviz \
-        libvtk6-dev libeigen3-dev python3-xlib python3-pyqt5 pyqt5-dev-tools python3-mpi4py \
-        python3-pyqt5.qtwebkit gtk2-engines-pixbuf python3-pyqt5.qtsvg libqglviewer-dev-qt5 \
-        python3-pil libjs-jquery python3-sphinx python3-git libxmu-dev libxi-dev libcgal-dev \
-        help2man libbz2-dev zlib1g-dev libopenblas-dev libsuitesparse-dev \
-        libmetis-dev python3-bibtexparser python3-future coinor-clp coinor-libclp-dev \
-        python3-mpmath libmpfr-dev libmpfrc++-dev libmpc-dev texlive-xetex python3-pickleshare python3-ipython-genutils \
-        && apt clean"
+        sudo docker exec qtbuilder bash -c "apt-get update && \
+          apt-get install -y gnupg && \
+          apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 3B4FE6ACC0B21F32 871920D1991BC93C && \
+          echo 'deb http://archive.ubuntu.com/ubuntu focal main universe' >> /etc/apt/sources.list && \
+          echo 'deb http://archive.ubuntu.com/ubuntu focal-updates main universe' >> /etc/apt/sources.list && \
+          apt update -y && \
+          apt install -y cmake git freeglut3-dev libboost-all-dev fakeroot \
+          dpkg-dev build-essential g++ python3-dev python3-ipython python3-matplotlib \
+          libsqlite3-dev python3-numpy python3-tk gnuplot libgts-dev python3-pygraphviz \
+          libvtk6-dev libeigen3-dev python3-xlib python3-pyqt5 pyqt5-dev-tools python3-mpi4py \
+          python3-pyqt5.qtwebkit gtk2-engines-pixbuf python3-pyqt5.qtsvg libqglviewer-dev-qt5 \
+          python3-pil libjs-jquery python3-sphinx python3-git libxmu-dev libxi-dev libcgal-dev \
+          help2man libbz2-dev zlib1g-dev libopenblas-dev libsuitesparse-dev \
+          libmetis-dev python3-bibtexparser python3-future coinor-clp coinor-libclp-dev \
+          python3-mpmath libmpfr-dev libmpfrc++-dev libmpc-dev texlive-xetex python3-pickleshare python3-ipython-genutils \
+          && apt clean"
         
     - name: Check compiler version
       run: |
